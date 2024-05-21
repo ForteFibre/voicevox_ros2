@@ -25,17 +25,16 @@
 
 #include "voicevox_core_vendor/open_jtalk_dict_dir.h"
 #include "voicevox_core_vendor/voicevox_core.h"
-#include "voicevox_ros2_msgs/msg/talk.hpp"
+#include "voicevox_ros2_msgs/srv/talk.hpp"
 
 #include "mixer.hpp"
 #include "queue.hpp"
 
 namespace tutrobo {
 class VoicevoxRos2 : public rclcpp::Node {
-  Queue<voicevox_ros2_msgs::msg::Talk, 10> talk_queue_;
+  Queue<voicevox_ros2_msgs::srv::Talk::Request, 10> talk_queue_;
   std::thread talk_thread_;
-  rclcpp::Subscription<voicevox_ros2_msgs::msg::Talk>::SharedPtr
-      voicevox_ros2_sub_;
+  rclcpp::Service<voicevox_ros2_msgs::srv::Talk>::SharedPtr voicevox_ros2_srv_;
 
   static inline Mixer mixer;
 
@@ -83,16 +82,28 @@ public:
     talk_thread_ = std::thread{&VoicevoxRos2::voicevox_talk, this};
 
     // サブスクライバ
-    voicevox_ros2_sub_ =
-        this->create_subscription<voicevox_ros2_msgs::msg::Talk>(
-            "voicevox_ros2", rclcpp::QoS(10),
-            [this](const voicevox_ros2_msgs::msg::Talk::SharedPtr msg) {
-              if (msg->queuing) {
-                talk_queue_.push_back(*msg);
-              } else {
-                talk_queue_.push_front(*msg);
-              }
-            });
+    // voicevox_ros2_sub_ =
+    //     this->create_subscription<voicevox_ros2_msgs::msg::Talk>(
+    //         "voicevox_ros2", rclcpp::QoS(10),
+    //         [this](const voicevox_ros2_msgs::msg::Talk::SharedPtr msg) {
+    //           if (msg->queuing) {
+    //             talk_queue_.push_back(*msg);
+    //           } else {
+    //             talk_queue_.push_front(*msg);
+    //           }
+    //         });
+
+    voicevox_ros2_srv_ = this->create_service<voicevox_ros2_msgs::srv::Talk>(
+        "voicevox_ros2_talk",
+        [this](
+            const std::shared_ptr<voicevox_ros2_msgs::srv::Talk::Request> req,
+            std::shared_ptr<voicevox_ros2_msgs::srv::Talk::Response>) {
+          if (req->queuing) {
+            talk_queue_.push_back(*req);
+          } else {
+            talk_queue_.push_front(*req);
+          }
+        });
   }
 
   ~VoicevoxRos2() {
@@ -111,28 +122,28 @@ public:
 
 private:
   void voicevox_talk() {
-    voicevox_ros2_msgs::msg::Talk msg;
+    voicevox_ros2_msgs::srv::Talk::Request req;
 
-    while (this->talk_queue_.pop(msg)) {
-      if (!voicevox_is_model_loaded(msg.speaker_id)) {
+    while (this->talk_queue_.pop(req)) {
+      if (!voicevox_is_model_loaded(req.speaker_id)) {
         RCLCPP_ERROR(this->get_logger(), "Model id %d is not loaded.",
-                     msg.speaker_id);
+                     req.speaker_id);
         continue;
       }
 
       RCLCPP_INFO(this->get_logger(), "Synthesizing \"%s\"...",
-                  msg.text.c_str());
+                  req.text.c_str());
       [[maybe_unused]] size_t wav_size = 0;
       uint8_t *wav = nullptr;
       VoicevoxResultCode voicevox_result =
-          voicevox_tts(msg.text.c_str(), msg.speaker_id,
+          voicevox_tts(req.text.c_str(), req.speaker_id,
                        voicevox_make_default_tts_options(), &wav_size, &wav);
       if (voicevox_result != VOICEVOX_RESULT_OK) {
         RCLCPP_ERROR(this->get_logger(), "%s",
                      voicevox_error_result_to_message(voicevox_result));
       }
 
-      if (msg.queuing) {
+      if (req.queuing) {
         mixer.enqueue(Mix_QuickLoad_WAV(wav));
       } else {
         mixer.play(Mix_QuickLoad_WAV(wav));
